@@ -3,35 +3,31 @@ import os
 import requests
 from playwright.sync_api import sync_playwright
 
-# 1. 깃허브 금고에 숨겨둔 슬랙 주소 자동으로 가져오기
+# 1. 깃허브 금고에서 슬랙 주소 가져오기
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL")
 
-# 2. X(트위터)에서 검색할 주소 설정
-# 예시: 로이터(Reuters) 계정이 쓴 글 중 'Tesla' 또는 'EV'가 포함된 최신글(live) 보기 URL입니다.
-# 나중에 본인이 원하는 검색어로 X에서 검색한 뒤 그 URL로 바꾸셔도 됩니다.
-TARGET_URL = "https://x.com/search?q=from%3AReuters%20(Tesla%20OR%20EV)&f=live"
+# 2. 🔥 1안(주요 외신)과 2안(우주 전문/머스크) 두 개 주소를 모두 등록!
+TARGET_URLS = {
+    "글로벌 외신 (테슬라/우주/AI)": "https://x.com/search?q=(from%3AReuters%20OR%20from%3ABloomberg%20OR%20from%3ACNBC%20OR%20from%3ATechCrunch%20OR%20from%3AWSJ)%20(Musk%20OR%20SpaceX%20OR%20xAI%20OR%20Tesla%20OR%20NVIDIA%20OR%20%22Rocket%20Lab%22%20OR%20%22Intuitive%20Machines%22)%20-filter%3Areplies&f=live",
+    "우주 전문 매체 & 일론 머스크": "https://x.com/search?q=(from%3Aelonmusk%20OR%20from%3ASpaceX%20OR%20from%3ASpaceflightNow%20OR%20from%3AInt_Machines%20OR%20from%3ARocketLab)%20-filter%3Areplies&f=live"
+}
+
 DB_FILE = "last_tweet.txt"
 
-def get_latest_tweet():
+def get_latest_tweet(url):
     with sync_playwright() as p:
-        # 가상 환경(리눅스 서버)에서 브라우저를 안정적으로 띄우기 위한 설정
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
         page = context.new_page()
 
-        # 설정한 X 검색 페이지로 이동 및 로딩 대기
-        page.goto(TARGET_URL, wait_until="networkidle")
+        page.goto(url, wait_until="networkidle")
         page.wait_for_selector('article[data-testid="tweet"]', timeout=30000)
 
-        # 화면 맨 위에 있는 가장 최신 트윗 1개 지정
         tweet_element = page.locator('article[data-testid="tweet"]').first
-
-        # 트윗의 본문 글자 추출
         tweet_text = tweet_element.locator('[data-testid="tweetText"]').inner_text()
 
-        # 트윗의 고유 링크(URL) 주소 추출
         try:
             tweet_link_element = tweet_element.locator('time').parent()
             tweet_href = tweet_link_element.get_attribute("href")
@@ -42,32 +38,49 @@ def get_latest_tweet():
         browser.close()
         return tweet_text, tweet_url
 
-def send_slack(text, url):
+def send_slack(category, text, url):
     payload = {
-        "text": f"📰 *[X 실시간 뉴스 알림]*\n\n{text}\n\n🔗 바로가기: {url}"
+        "text": f"🚀 *[TIGER 우주테크 알림 - {category}]*\n\n{text}\n\n🔗 바로가기: {url}"
     }
     requests.post(SLACK_WEBHOOK_URL, json=payload)
 
 if __name__ == "__main__":
     try:
-        current_text, current_url = get_latest_tweet()
-
-        # 중복 발송을 막기 위해 10분 전에 보냈던 마지막 트윗 주소 읽어오기
-        prev_url = ""
+        # 이전에 저장된 각 채널별 마지막 트윗 주소들 로드
+        prev_urls = {}
         if os.path.exists(DB_FILE):
-            with open(DB_FILE, "r", encoding="utf-8") as f:
-                prev_url = f.read().strip()
+            try:
+                with open(DB_FILE, "r", encoding="utf-8") as f:
+                    for line in f:
+                        if "==" in line:
+                            cat, url = line.strip().split("==", 1)
+                            prev_urls[cat] = url
+            except:
+                pass
 
-        # 새로운 트윗이 올라왔을 때만 슬랙으로 전송
-        if current_url and current_url != prev_url:
-            print("새로운 뉴스 트윗을 발견했습니다! 슬랙 푸시 발송.")
-            send_slack(current_text, current_url)
+        current_urls_state = []
 
-            # 방금 보낸 트윗 주소를 기억하기 위해 파일에 저장
-            with open(DB_FILE, "w", encoding="utf-8") as f:
-                f.write(current_url)
-        else:
-            print("새로 올라온 뉴스가 없습니다.")
+        # 1안, 2안 차례대로 돌면서 새 트윗 검사
+        for category, url in TARGET_URLS.items():
+            print(f"[{category}] 크롤링 시작...")
+            try:
+                current_text, current_url = get_latest_tweet(url)
+
+                # 해당 카테고리에 새 글이 올라왔다면 슬랙 전송
+                if current_url and current_url != prev_urls.get(category, ""):
+                    print(f"-> 새로운 뉴스 발견! 슬랙 전송")
+                    send_slack(category, current_text, current_url)
+                    current_urls_state.append(f"{category}=={current_url}\n")
+                else:
+                    print(f"-> 새로운 뉴스 없음.")
+                    current_urls_state.append(f"{category}=={prev_urls.get(category, '')}\n")
+            except Exception as e:
+                print(f"{category} 처리 중 오류: {e}")
+                current_urls_state.append(f"{category}=={prev_urls.get(category, '')}\n")
+
+        # 최신 상태를 파일에 저장
+        with open(DB_FILE, "w", encoding="utf-8") as f:
+            f.writelines(current_urls_state)
 
     except Exception as e:
-        print(f"작동 중 오류 발생: {e}")
+        print(f"전체 시스템 작동 중 오류 발생: {e}")
